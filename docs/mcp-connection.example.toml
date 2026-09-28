@@ -1,0 +1,5 @@
+# Пример отдельного подключения. Не является изменением конфигурации клиента.
+[mcp_servers.bim_s_3]
+command = "dotnet"
+args = ['D:\BIM-S-MCP-3\BIM-S_MCP-Server-3\bin\Debug\net10.0\BIM-S_MCP-Server-3.dll']
+cwd = 'D:\BIM-S-MCP-3'
