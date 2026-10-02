@@ -2,7 +2,7 @@ namespace BimS.Mcp3;
 
 public static class ComparisonEngine
 {
-    public static string[] ValidateRequest(ComparisonRequest request)
+    public static string[] ValidateRequest(ComparisonRequest request, VersionResolver? versions = null, bool checkSourceFiles = true)
     {
         Data.Require(request != null && request.OldVersion != null && request.NewVersion != null && request.Pairing != null, "Нужны версии и сведения о сопоставлении.");
         Data.Require(request!.Mode is "3d" or "2d" or "both", "mode: 3d, 2d или both.");
@@ -13,11 +13,13 @@ public static class ComparisonEngine
         Data.Require(!string.IsNullOrWhiteSpace(request.OldVersion.Label) && !string.IsNullOrWhiteSpace(request.NewVersion.Label), "Нужны подписи версий.");
         string[] dimensions = request.Mode == "both" ? ["3d", "2d"] : [request.Mode];
         if (dimensions.Contains("3d")) Data.Require(request.Pairing.Comparable3dScopeConfirmed && !string.IsNullOrWhiteSpace(request.Pairing.Scope3dDescription), "Для 3D подтвердите сопоставимость области и опишите правило отбора.");
+        if (checkSourceFiles)
         foreach (var d in dimensions) foreach (var version in new[] { request.OldVersion, request.NewVersion })
-            Data.Require(!string.IsNullOrWhiteSpace(PathFor(version, d)), "Нет пути " + d + " для " + version.VersionId);
+            Data.Require(File.Exists((versions ?? new VersionResolver()).PathFor(version, d, request.ModelKey)), "Нет файла " + d + " для " + version.VersionId);
         return dimensions;
     }
-    public static string PathFor(VersionInput version, string dimension) => (dimension == "3d" ? version.Json3dPath : version.Json2dPath)!;
+    public static string PathFor(VersionInput version, string dimension, string modelKey) =>
+        new VersionResolver().PathFor(version, dimension, modelKey);
     public static SectionResult Compare(Snapshot old, Snapshot newer, CancellationToken token = default)
     {
         Data.Require(old.Dimension == newer.Dimension, "Разные типы снимков.");
@@ -47,27 +49,28 @@ public static class ComparisonEngine
         Data.Require(counts.Old == counts.Unchanged + counts.Changed + counts.Removed && counts.New == counts.Unchanged + counts.Changed + counts.Added, "Нарушен баланс сравнения.");
         return new("complete", old.Source, newer.Source, counts, unchanged, changed, added, removed);
     }
-    public static async Task<ComparisonResult> RunAsync(ComparisonRequest request, CancellationToken token = default)
+    public static async Task<ComparisonResult> RunAsync(ComparisonRequest request, CancellationToken token = default, VersionResolver? versions = null)
     {
-        var dimensions = ValidateRequest(request);
+        versions ??= new VersionResolver();
+        var dimensions = ValidateRequest(request, versions);
         var sections = new Dictionary<string, SectionResult> { ["3d"] = new("notRequested"), ["2d"] = new("notRequested") };
         var limitations = new List<string>
         {
-            "Сопоставление файлов и принадлежность одной линии версий подтверждены пользователем, а не доказаны содержимым JSON.",
+            "Принадлежность одной линии версий предполагается по modelKey и схеме имён; содержимое JSON не доказывает идентичность модели.",
             "Равенство означает равенство сохранённых сравниваемых данных; появление и удаление относятся к заявленной области снимков.",
-            "Время экспорта и documentSession не являются ревизией; порядок old/new задан пользователем. Причины изменений не анализировались."
+            "Время экспорта и documentSession не являются ревизией; порядок old/new задан аргументами сравнения. Причины изменений не анализировались."
         };
         if (dimensions.Contains("3d")) limitations.Add("MCP-1 не сохраняет идентификатор модели, uniqueId и активный вид; сопоставимость отбора 3D проверить по JSON невозможно.");
         if (dimensions.Contains("2d")) limitations.Add("MCP-2 отбирает аннотации по OwnerViewId; видимость на печати не вычисляется. Неподдерживаемые свойства не описывают фактическое состояние Revit.");
         foreach (var d in dimensions)
         {
-            var old = await SnapshotReader.ReadAsync(PathFor(request.OldVersion, d), d, token);
-            var newer = await SnapshotReader.ReadAsync(PathFor(request.NewVersion, d), d, token);
+            var old = await SnapshotReader.ReadAsync(versions.PathFor(request.OldVersion, d, request.ModelKey), d, token);
+            var newer = await SnapshotReader.ReadAsync(versions.PathFor(request.NewVersion, d, request.ModelKey), d, token);
             sections[d] = Compare(old, newer, token);
             if (!Canonical.Equal(old.Source.Metadata["documentSession"], newer.Source.Metadata["documentSession"]))
                 limitations.Add(d + ": documentSession старого и нового снимков различаются; это не определяет совместимость версий.");
             if (!Canonical.Equal(old.Source.Metadata["document"], newer.Source.Metadata["document"]))
-                limitations.Add(d + ": сведения о документах различаются; принадлежность одной линии версий задана пользователем.");
+                limitations.Add(d + ": сведения о документах различаются; принадлежность одной линии версий предполагается по линии версий.");
         }
         if (dimensions.Length == 2)
             foreach (var side in new[] { "old", "new" })
@@ -75,7 +78,7 @@ public static class ComparisonEngine
                 var a = side == "old" ? sections["3d"].OldSource! : sections["3d"].NewSource!;
                 var b = side == "old" ? sections["2d"].OldSource! : sections["2d"].NewSource!;
                 if (!Canonical.Equal(a.Metadata["documentSession"], b.Metadata["documentSession"]))
-                    limitations.Add(side + ": сессии 3D и 2D различаются; соответствие пары задано пользователем.");
+                    limitations.Add(side + ": сессии 3D и 2D различаются; соответствие пары предполагается по линии версий.");
             }
         return new(1, Data.Policy, Guid.NewGuid().ToString("N"), DateTime.UtcNow, request, limitations, sections);
     }

@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <BaseOutputPath>D:\BIM-S\_TestArtifacts\build\Mcp3.Tests\bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>D:\BIM-S\_TestArtifacts\build\Mcp3.Tests\obj\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

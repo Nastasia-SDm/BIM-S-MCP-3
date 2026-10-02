@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -5,13 +6,22 @@ using BimS.Mcp3;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
-var workspace = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../"));
+var toolingTemp = @"D:\BIM-S\_TestArtifacts\tooling-temp";
+Directory.CreateDirectory(toolingTemp);
+Environment.SetEnvironmentVariable("TEMP", toolingTemp);
+Environment.SetEnvironmentVariable("TMP", toolingTemp);
+if (args.Length == 2 && args[0] == "--test-server")
+{
+    await ProductionSmoke.ServeAsync(args[1]);
+    return;
+}
+var workspace = typeof(ProductionSmoke).Assembly.GetCustomAttributes<System.Reflection.AssemblyMetadataAttribute>().Single(a => a.Key == "Mcp3Workspace").Value!;
 if (args.Contains("--production-smoke-only"))
 {
     await ProductionSmoke.RunAsync(workspace);
     return;
 }
-var output = Path.Combine(workspace, "artifacts", "tests", Guid.NewGuid().ToString("N"));
+var output = Path.Combine(@"D:\BIM-S\_TestArtifacts", "MCP3", "runs", Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(output); var passed = 0;
 void Check(bool condition, string label) { if (!condition) throw new Exception(label); passed++; Console.WriteLine("PASS " + label); }
 void Reject(Action action, string label) { try { action(); } catch (InvalidDataException) { Check(true, label); return; } throw new Exception("Expected rejection: " + label); }
@@ -74,37 +84,94 @@ var curve = Copy(graph); curve["elements"]![0]!["properties"]!["curve"] = Fixtur
 var curveOrder = Copy(curve); curveOrder["elements"]![0]!["properties"]!["curve"]!["value"]!["sampledPoints"] = new JsonArray(2, 1);
 Check(Compare(curve, curveOrder, "2d").Counts!.Changed == 1, "geometric point order preserved");
 
-var aPath = Path.Combine(output, "old3d.json"); var bPath = Path.Combine(output, "new3d.json");
-var cPath = Path.Combine(output, "old2d.json"); var dPath = Path.Combine(output, "new2d.json");
+var catalog = new VersionResolver(Path.Combine(output, "3d"), Path.Combine(output, "2d"));
+var aPath = catalog.PathFor(new("V003", "V003"), "3d", "Test_AI-Work");
+var bPath = catalog.PathFor(new("V007", "V007"), "3d", "Test_AI-Work");
+var cPath = catalog.PathFor(new("V003", "V003"), "2d", "Test_AI-Work");
+var dPath = catalog.PathFor(new("V007", "V007"), "2d", "Test_AI-Work");
+Directory.CreateDirectory(Path.GetDirectoryName(aPath)!);
+Directory.CreateDirectory(Path.GetDirectoryName(cPath)!);
 await File.WriteAllTextAsync(aPath, original.ToJsonString()); await File.WriteAllTextAsync(bPath, changed.ToJsonString());
 await File.WriteAllTextAsync(cPath, graph.ToJsonString()); await File.WriteAllTextAsync(dPath, graphChanged.ToJsonString());
-var request = Fixtures.Request("3d", aPath, bPath);
-Reject(() => ComparisonEngine.ValidateRequest(request with { Pairing = request.Pairing with { Confirmed = false } }), "explicit pairing required");
-Reject(() => ComparisonEngine.ValidateRequest(request with { Pairing = request.Pairing with { Comparable3dScopeConfirmed = false } }), "3D scope confirmation required");
-var only3d = await ComparisonEngine.RunAsync(request); Check(only3d.Sections["2d"].Status == "notRequested", "3D independent mode");
-var only2d = await ComparisonEngine.RunAsync(Fixtures.Request("2d", cPath, dPath)); Check(only2d.Sections["3d"].Status == "notRequested", "2D independent mode");
-var bothRequest = request with { Mode = "both", OldVersion = request.OldVersion with { Json2dPath = cPath }, NewVersion = request.NewVersion with { Json2dPath = dPath } };
-var both = await ComparisonEngine.RunAsync(bothRequest); var html = ComparisonReport.Render(both);
+var request = Fixtures.Request("3d", "V003", "V007");
+Reject(() => ComparisonEngine.ValidateRequest(request with { Pairing = request.Pairing with { Confirmed = false } }, catalog), "explicit pairing required");
+Reject(() => ComparisonEngine.ValidateRequest(request with { Pairing = request.Pairing with { Comparable3dScopeConfirmed = false } }, catalog), "3D scope confirmation required");
+var only3d = await ComparisonEngine.RunAsync(request, versions: catalog); Check(only3d.Sections["2d"].Status == "notRequested", "3D independent mode");
+var only2d = await ComparisonEngine.RunAsync(Fixtures.Request("2d", "V003", "V007"), versions: catalog); Check(only2d.Sections["3d"].Status == "notRequested", "2D independent mode");
+var bothRequest = request with { Mode = "both" };
+var both = await ComparisonEngine.RunAsync(bothRequest, versions: catalog); var html = ComparisonReport.Render(both);
 Check(both.Sections.Values.All(s => s.Status == "complete"), "both mode");
 Check(html.Contains("3D — Модель") && html.Contains("2D — Документация") && new[] { "НЕ ИЗМЕНИЛИСЬ", "ИЗМЕНИЛИСЬ", "ПОЯВИЛИСЬ", "УДАЛИЛИСЬ", "ElementId", "#eceff1", "#fff4cc", "#e2f2df", "#f8e1e7" }.All(html.Contains), "HTML sections, IDs, groups and colors");
 Check(!html.Contains("<script>alert") && html.Contains("&lt;script&gt;"), "HTML injection encoded");
 var tampered = both with { Sections = new(both.Sections) { ["3d"] = both.Sections["3d"] with { Counts = new Counts(0, 0, 0, 0, 0, 0) } } };
 Reject(() => ComparisonReport.Render(tampered), "report checks result integrity");
-var tools = new ComparisonTools(new ReportFiles(output)); var saved = await tools.CompareAsync(bothRequest, default); var savedData = ResultData(saved);
+var tools = new ComparisonTools(new ReportFiles(output), catalog); var saved = await tools.CompareAsync("V003", "V007", default); var savedData = ResultData(saved);
 Check(saved.IsError != true && File.Exists(savedData["jsonPath"]!.GetValue<string>()) && File.Exists(savedData["htmlPath"]!.GetValue<string>()), "JSON and HTML saved");
-// No input access on regeneration: move only our own test inputs inside the workspace.
+// No input access on regeneration: move only our own test inputs inside the dedicated artifact directory.
 File.Move(aPath, aPath + ".saved"); File.Move(bPath, bPath + ".saved");
 var regenerated = await tools.CreateReportAsync(savedData["jsonPath"]!.GetValue<string>(), default);
 Check(regenerated.IsError != true, "regenerate HTML without original snapshots");
 File.Move(aPath + ".saved", aPath); File.Move(bPath + ".saved", bPath);
-var failing = await new ComparisonTools(new FailingHtmlFiles(output)).CompareAsync(request, default);
+var failing = await new ComparisonTools(new FailingHtmlFiles(output), catalog).CompareAsync("V003", "V007", default, "3d");
 Check(failing.IsError == true && ResultData(failing)["stage"]!.GetValue<string>() == "html-report" && File.Exists(ResultData(failing)["jsonPath"]!.GetValue<string>()), "HTML failure preserves JSON and returns path");
-var canceled = await tools.CompareAsync(request, new CancellationToken(true)); Check(canceled.IsError == true && ResultData(canceled)["jsonPath"] == null, "cancellation before save");
+var canceled = await tools.CompareAsync("V003", "V007", new CancellationToken(true), "3d"); Check(canceled.IsError == true && ResultData(canceled)["jsonPath"] == null, "cancellation before save");
 await File.WriteAllTextAsync(Path.Combine(output, "no-overwrite.json"), "original");
 try { await new ReportFiles(output).SaveAsync("no-overwrite.json", "replacement", default); throw new Exception("overwrite accepted"); }
 catch (IOException) { Check(await File.ReadAllTextAsync(Path.Combine(output, "no-overwrite.json")) == "original" && !Directory.GetFiles(output, "*.tmp").Any(), "atomic save never overwrites and cleans temp"); }
 
-// Real files are only read; never claim that these exports form paired model revisions.
+// Resolve a fresh catalog on every invocation, but both aliases from one listing.
+var aliases = new VersionResolver(Path.Combine(output, "alias3d"), Path.Combine(output, "alias2d"));
+async Task<string> Put(string dimension, string version, JsonObject data)
+{
+    var path = aliases.PathFor(new(version, version), dimension, "Test_AI-Work");
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    await File.WriteAllTextAsync(path, data.ToJsonString());
+    return path;
+}
+Reject(() => aliases.Resolve("previous", "latest", "3d", "Test_AI-Work"), "missing catalog rejected");
+await Put("3d", "V003", original);
+Reject(() => aliases.Resolve("previous", "latest", "3d", "Test_AI-Work"), "one snapshot has no previous");
+await Put("3d", "V007", changed);
+Check(aliases.Resolve("previous", "latest", "3d", "Test_AI-Work") == ("V003", "V007"), "previous crosses gaps");
+await Put("2d", "V011", graph);
+await Put("2d", "V012", graphChanged);
+var aliasTools = new ComparisonTools(new ReportFiles(output), aliases);
+var aliasBoth = ResultData(await aliasTools.CompareAsync("previous", "latest", default));
+Check(aliasBoth["status"]!.GetValue<string>() == "complete" &&
+    aliasBoth["comparisons"]!["3d"]!["version2"]!.GetValue<string>() == "V007" &&
+    aliasBoth["comparisons"]!["2d"]!["version2"]!.GetValue<string>() == "V012", "both resolves independent version lines");
+Check(aliasBoth["comparisons"]!["3d"]!["sections"]!["3d"]!["changed"]![0]!["semanticChanges"]!.AsArray().Count > 0,
+    "structured result includes actual changes");
+var alias3d = ResultData(await aliasTools.CompareAsync("previous", "latest", default, "3d"));
+Check(alias3d["sections"]!["2d"]!["status"]!.GetValue<string>() == "notRequested", "aliases support model only");
+var alias2d = ResultData(await aliasTools.CompareAsync("previous", "latest", default, "2d"));
+Check(alias2d["version1"]!.GetValue<string>() == "V011", "aliases support documentation only");
+Check((await aliasTools.CompareAsync("V003", "latest", default, "3d")).IsError != true, "mixed explicit and alias");
+Check((await aliasTools.CompareAsync("latest", "latest", default, "3d")).IsError == true, "equal resolved versions rejected");
+Check((await aliasTools.CompareAsync("previous", "latest", default, "bad")).IsError == true, "invalid mode rejected");
+Check((await aliasTools.CompareAsync("V003\n", "V007", default)).IsError == true, "trailing newline in version rejected");
+Check((await aliasTools.CompareAsync("../V003", "V007", default)).IsError == true, "path instead of version rejected");
+await Put("3d", "V010", changed);
+Check(aliases.Resolve("previous", "latest", "3d", "Test_AI-Work") == ("V007", "V010"), "fresh snapshot discovered at execution");
+await Put("3d", "V1000", changed);
+Check(aliases.Resolve("previous", "latest", "3d", "Test_AI-Work") == ("V010", "V1000"), "numeric ordering supports versions beyond 999");
+var incomplete = Copy(changed); incomplete["status"] = "partial";
+await Put("3d", "V1001", incomplete);
+Check((await aliasTools.CompareAsync("previous", "latest", default, "3d")).IsError == true, "partial latest is not silently skipped");
+var brokenPath = await Put("3d", "V1002", changed);
+await File.WriteAllTextAsync(brokenPath, "{broken");
+Check((await aliasTools.CompareAsync("previous", "latest", default, "3d")).IsError == true, "broken latest is not silently skipped");
+var catalogRoot = Path.GetDirectoryName(brokenPath)!;
+await File.WriteAllTextAsync(Path.Combine(catalogRoot, "Other_V9999_model.json"), "{}");
+await File.WriteAllTextAsync(Path.Combine(catalogRoot, "Test_AI-Work_V9999_model.json.tmp"), "{}");
+await File.WriteAllTextAsync(Path.Combine(catalogRoot, "Test_AI-Work_V9999_model.html"), "{}");
+Check(aliases.Resolve("previous", "latest", "3d", "Test_AI-Work").New == "V1002", "foreign models, HTML and temporary files ignored");
+await Put("3d", "V01002", changed);
+Reject(() => aliases.Resolve("previous", "latest", "3d", "Test_AI-Work"), "duplicate numeric version is ambiguous");
+
+
+// Real snapshots are opt-in; ordinary tests use only synthetic inputs.
+if (args.Contains("--real-snapshots"))
 foreach (var (folder, dimension) in new[] { (@"D:\BIM-S-MCP-1_Отчеты_Версии модели", "3d"), (@"D:\BIM-S-MCP-2_Отчеты_Версии модели", "2d") })
     if (Directory.Exists(folder)) foreach (var file in Directory.GetFiles(folder, "*.json"))
     {
@@ -121,9 +188,17 @@ await using var client = await McpClient.CreateAsync(new StdioClientTransport(ne
 var exposed = await client.ListToolsAsync(cancellationToken: deadline.Token);
 Check(exposed.Select(t => t.Name).Order().SequenceEqual(new[] { "compare-model-versions", "create-model-comparison-report" }), "stdio handshake, exactly two tools");
 await File.WriteAllTextAsync(Path.Combine(output, "tool-schemas.json"), JsonSerializer.Serialize(exposed.Select(t => new { t.Name, t.JsonSchema }), Data.Json));
-var invalid = await client.CallToolAsync("compare-model-versions", new Dictionary<string, object?> { ["request"] = request with { Pairing = request.Pairing with { Confirmed = false } } }, cancellationToken: deadline.Token);
-Check(invalid.IsError == true && ResultData(invalid)["stage"]!.GetValue<string>() == "validation-and-comparison", "structured validation error over MCP");
+var invalid = await client.CallToolAsync("compare-model-versions", new Dictionary<string, object?> { ["version1"] = "invalid", ["version2"] = "latest" }, cancellationToken: deadline.Token);
+Check(invalid.IsError == true && ResultData(invalid)["stage"]!.GetValue<string>() == "resolve-versions", "structured validation error over MCP");
+var schema = exposed.Single(t => t.Name == "compare-model-versions").JsonSchema;
+var props = schema.GetProperty("properties");
+Check(props.GetProperty("version1").GetProperty("description").GetString()!.Contains("previous") &&
+    props.GetProperty("version2").GetProperty("description").GetString()!.Contains("latest") &&
+    props.GetProperty("mode").GetProperty("default").GetString() == "both", "schema advertises aliases and optional mode");
+Check(!schema.GetProperty("required").EnumerateArray().Any(p => p.GetString() == "mode"), "legacy call does not require mode");
 Check(stderr.Count == 0, "clean protocol stdout and no unexpected stderr");
+SemanticTests.Run(Check, output);
+await ProductionSmoke.RunAsync(workspace);
 Console.WriteLine($"{passed} checks passed. Artifacts: {output}");
 
 sealed class FailingHtmlFiles(string root) : ReportFiles(root)

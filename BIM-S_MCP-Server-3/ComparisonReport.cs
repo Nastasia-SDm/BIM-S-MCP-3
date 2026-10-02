@@ -9,7 +9,7 @@ public static class ComparisonReport
     public static void Validate(ComparisonResult result, CancellationToken token = default)
     {
         Data.Require(result.SchemaVersion == 1 && result.PolicyVersion == Data.Policy && Guid.TryParseExact(result.ComparisonId, "N", out _), "Неподдерживаемый результат сравнения.");
-        var requested = ComparisonEngine.ValidateRequest(result.Request);
+        var requested = ComparisonEngine.ValidateRequest(result.Request, checkSourceFiles: false);
         Data.Require(result.Sections != null && result.Sections.Count == 2 && result.Sections.ContainsKey("3d") && result.Sections.ContainsKey("2d") && result.Limitations != null, "Неверные разделы результата.");
         foreach (var d in new[] { "3d", "2d" })
         {
@@ -48,7 +48,7 @@ public static class ComparisonReport
         var html = new StringBuilder("<!doctype html><html lang='ru'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>BIM-S — Сравнение версий модели</title><style>");
         html.Append("*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#17243a;font:16px/1.5 Segoe UI,Arial,sans-serif}main{max-width:1400px;margin:48px auto;padding:0 24px}header{background:#13283f;color:white;padding:32px;border-radius:20px}h1{margin:0;font-size:30px}.total{font-size:28px;font-weight:700;color:#73e1c0}.table,.info{margin-top:24px;background:white;border-radius:16px;overflow:auto;padding:20px;box-shadow:0 8px 30px #13283f12}table{width:100%;border-collapse:collapse}th,td{padding:12px;border-bottom:1px solid #edf0f4;vertical-align:top;text-align:left}th{background:#dfe8f1}tr:hover{background:#f3faf8}summary{cursor:pointer;color:#14765e}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}.id{font-family:Consolas,monospace}h3{padding:14px;border-radius:8px}.unchanged{background:#eceff1}.changed{background:#fff4cc}.added{background:#e2f2df}.removed{background:#f8e1e7}.info{overflow-wrap:anywhere}@media print{.table{overflow:visible}header{color:#17243a;background:white}}</style></head><body><main><header><h1>BIM-S — Сравнение версий модели</h1>");
         html.Append($"<p>{E(result.Request.ModelKey)}</p><div class='total'>{E(result.Request.OldVersion.Label)} → {E(result.Request.NewVersion.Label)}</div><p>{E(result.Request.OldVersion.VersionId)} → {E(result.Request.NewVersion.VersionId)}</p></header>");
-        html.Append("<section class='info'><h2>Сопоставление и ограничения</h2><p>Сопоставление подтверждено пользователем: " + E(result.Request.Pairing.Method) + "</p>");
+        html.Append("<section class='info'><h2>Сопоставление и ограничения</h2><p>Основание сопоставления: " + E(result.Request.Pairing.Method) + "</p>");
         if (result.Request.Mode != "2d") html.Append("<p>Область 3D: " + E(result.Request.Pairing.Scope3dDescription) + "</p>");
         html.Append("<ul>"); foreach (var text in result.Limitations) html.Append("<li>" + E(text) + "</li>"); html.Append("</ul></section>");
         foreach (var d in new[] { "3d", "2d" })

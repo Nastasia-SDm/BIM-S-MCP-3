@@ -50,6 +50,6 @@ static class Fixtures
     }
     public static Snapshot Snapshot(JsonObject root, string dimension = "3d") => new(dimension,
         new(Path.GetFullPath("fixture.json"), new string('a', 64), Data.Pick(root, "scope", "coverage", "documentSession", "document")), SnapshotReader.Validate(root, dimension));
-    public static ComparisonRequest Request(string mode, string a, string b) => new(mode, "fixture-only",
-        new("v1", "Старая", a, a), new("v2", "Новая", b, b), new(true, "Синтетические тестовые данные", "Одинаковый тестовый вид", true));
+    public static ComparisonRequest Request(string mode, string a, string b) => new(mode, "Test_AI-Work",
+        new(a, "Старая"), new(b, "Новая"), new(true, "Синтетические тестовые данные", "Одинаковый тестовый вид", true));
 }

@@ -1,40 +1,61 @@
 using System.Text.Json;
 using BimS.Mcp3;
 using ModelContextProtocol.Client;
+using ModelContextProtocol.Server;
 
 static class ProductionSmoke
 {
+    public static async Task ServeAsync(string root)
+    {
+        var handlers = new ComparisonTools(new ReportFiles(root),
+            new VersionResolver(Path.Combine(root, "3d"), Path.Combine(root, "2d")));
+        var options = new McpServerOptions
+        {
+            ServerInfo = new() { Name = "MCP3 isolated test server", Version = "1.0.0" },
+            ToolCollection =
+            [
+                McpServerTool.Create(handlers.CompareAsync, new() { Name = "compare-model-versions" }),
+                McpServerTool.Create(handlers.CreateReportAsync, new() { Name = "create-model-comparison-report" })
+            ]
+        };
+        await using var server = McpServer.Create(new StdioServerTransport(options), options);
+        await server.RunAsync();
+    }
+
     public static async Task RunAsync(string workspace)
     {
-        var input = Path.Combine(workspace, "artifacts", "demo-inputs"); Directory.CreateDirectory(input);
-        var a = Fixtures.Model(1, 2, 3); var b = Fixtures.Model(1, 2, 4);
-        b["elements"]![1]!["instanceParameters"]![0]!["rawValue"] = 2;
-        var c = Fixtures.Documentation(); var d = Fixtures.Documentation();
-        d["elements"]![0]!["properties"]!["text"]!["value"] = "Новый текст";
-        string[] paths = [Path.Combine(input, "old3d.json"), Path.Combine(input, "new3d.json"), Path.Combine(input, "old2d.json"), Path.Combine(input, "new2d.json")];
-        var roots = new[] { a, b, c, d };
-        for (var i = 0; i < paths.Length; i++) await File.WriteAllTextAsync(paths[i], roots[i].ToJsonString());
-        var request = new ComparisonRequest("both", "DEMO — синтетические данные, не версии Revit",
-            new("demo-old", "Демонстрационная старая версия", paths[0], paths[2]),
-            new("demo-new", "Демонстрационная новая версия", paths[1], paths[3]),
-            new(true, "Автоматический тест на синтетических данных; не сопоставление реальных файлов MCP-1/MCP-2", "Синтетическая область теста", true));
+        var root = Path.Combine(@"D:\BIM-S\_TestArtifacts", "MCP3", "smoke", Guid.NewGuid().ToString("N"));
+        var catalog = new VersionResolver(Path.Combine(root, "3d"), Path.Combine(root, "2d"));
+        foreach (var dimension in new[] { "3d", "2d" })
+        foreach (var version in new[] { "V003", "V007" })
+        {
+            var path = catalog.PathFor(new(version, version), dimension, "Test_AI-Work");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var data = dimension == "3d" ? Fixtures.Model(1, version == "V003" ? 2 : 3) : Fixtures.Documentation();
+            await File.WriteAllTextAsync(path, data.ToJsonString());
+        }
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         await using var client = await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
         {
-            Name = "MCP3 production directory smoke", Command = "dotnet",
-            Arguments = [Path.Combine(workspace, "BIM-S_MCP-Server-3", "bin", "Debug", "net10.0", "BIM-S_MCP-Server-3.dll")], WorkingDirectory = workspace
+            Name = "MCP3 isolated smoke", Command = "dotnet",
+            Arguments = [typeof(ProductionSmoke).Assembly.Location, "--test-server", root], WorkingDirectory = workspace
         }), cancellationToken: deadline.Token);
-        var result = await client.CallToolAsync("compare-model-versions", new Dictionary<string, object?> { ["request"] = request }, cancellationToken: deadline.Token);
-        if (result.IsError == true) throw new Exception(result.StructuredContent?.GetRawText());
-        var content = result.StructuredContent!.Value;
-        var json = content.GetProperty("jsonPath").GetString()!; var html = content.GetProperty("htmlPath").GetString()!;
-        var saved = JsonSerializer.Deserialize<ComparisonResult>(await File.ReadAllTextAsync(json), Data.Json)!;
-        ComparisonReport.Validate(saved);
-        if (saved.Sections["3d"].Counts != new Counts(3, 3, 1, 1, 1, 1) || saved.Sections["2d"].Counts?.Changed != 1 || !File.Exists(html)) throw new Exception("Wrong MCP comparison result.");
-        var report = await client.CallToolAsync("create-model-comparison-report", new Dictionary<string, object?> { ["filePath"] = json }, cancellationToken: deadline.Token);
-        if (report.IsError == true) throw new Exception(report.StructuredContent?.GetRawText());
-        Console.WriteLine("PASS both tools via stdio; output in production directory; synthetic data only.");
-        Console.WriteLine("JSON: " + json); Console.WriteLine("HTML: " + html);
-        Console.WriteLine("Regenerated HTML: " + report.StructuredContent!.Value.GetProperty("htmlPath").GetString());
+        foreach (var pair in new[] { ("V003", "V007"), ("previous", "latest") })
+        {
+            var result = await client.CallToolAsync("compare-model-versions", new Dictionary<string, object?>
+                { ["version1"] = pair.Item1, ["version2"] = pair.Item2 }, cancellationToken: deadline.Token);
+            if (result.IsError == true) throw new Exception(result.StructuredContent?.GetRawText());
+            var content = result.StructuredContent!.Value;
+            if (content.TryGetProperty("comparisons", out var comparisons)) content = comparisons.GetProperty("3d");
+            var saved = JsonSerializer.Deserialize<ComparisonResult>(
+                await File.ReadAllTextAsync(content.GetProperty("jsonPath").GetString()!), Data.Json)!;
+            ComparisonReport.Validate(saved);
+            if (saved.Sections["3d"].Counts != new Counts(2, 2, 1, 0, 1, 1) ||
+                !File.Exists(content.GetProperty("htmlPath").GetString())) throw new Exception("Wrong comparison result.");
+            var report = await client.CallToolAsync("create-model-comparison-report", new Dictionary<string, object?>
+                { ["filePath"] = content.GetProperty("jsonPath").GetString() }, cancellationToken: deadline.Token);
+            if (report.IsError == true) throw new Exception(report.StructuredContent?.GetRawText());
+        }
+        Console.WriteLine("PASS explicit versions and aliases over stdio; JSON/HTML regenerated; synthetic data only.");
     }
 }

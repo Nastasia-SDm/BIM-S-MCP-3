@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 
 namespace BimS.Mcp3;
 
-public sealed record VersionInput(string VersionId, string Label, string? Json3dPath = null, string? Json2dPath = null);
+public sealed record VersionInput(string VersionId, string Label);
 public sealed record PairingInput(bool Confirmed, string Method, string? Scope3dDescription = null,
     bool Comparable3dScopeConfirmed = false);
 public sealed record ComparisonRequest(string Mode, string ModelKey, VersionInput OldVersion,
